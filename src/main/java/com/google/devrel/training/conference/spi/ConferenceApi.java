@@ -10,8 +10,15 @@ import com.google.api.server.spi.config.annotationreader.ApiConfigAnnotationRead
 import com.google.api.server.spi.response.ConflictException;
 import com.google.api.server.spi.response.ForbiddenException;
 import com.google.api.server.spi.response.UnauthorizedException;
+import com.google.appengine.api.memcache.MemcacheService;
+import com.google.appengine.api.memcache.MemcacheServiceFactory;
+import com.google.appengine.api.taskqueue.Queue;
+import com.google.appengine.api.taskqueue.QueueFactory;
+import com.google.appengine.api.taskqueue.TaskOptions;
+import com.google.appengine.api.taskqueue.TaskQueuePb;
 import com.google.appengine.api.users.User;
 import com.google.devrel.training.conference.Constants;
+import com.google.devrel.training.conference.domain.Announcement;
 import com.google.devrel.training.conference.domain.Profile;
 import com.google.devrel.training.conference.form.ConferenceQueryForm;
 import com.google.devrel.training.conference.form.ProfileForm;
@@ -170,94 +177,43 @@ public class ConferenceApi {
         if (user == null) {
             throw new UnauthorizedException("Authorization required");
         }
-
         // TODO (Lesson 4)
         // Get the userId of the logged in User
-        String userId = user.getUserId();
-
+        final String userId = user.getUserId();
         // TODO (Lesson 4)
         // Get the key for the User's Profile
         Key<Profile> profileKey = Key.create(Profile.class, userId);
-
         // TODO (Lesson 4)
         // Allocate a key for the conference -- let App Engine allocate the ID
         // Don't forget to include the parent Profile in the allocated ID
         final Key<Conference> conferenceKey = factory().allocateId(profileKey, Conference.class);
-
         // TODO (Lesson 4)
         // Get the Conference Id from the Key
         final long conferenceId = conferenceKey.getId();
+        final Queue queue = QueueFactory.getDefaultQueue();
 
-        // TODO (Lesson 4)
-        // Get the existing Profile entity for the current user if there is one
-        // Otherwise create a new Profile entity with default values
-        Profile profile = getProfileFromUser(user);
+        Conference conference = ofy().transact(new Work<Conference>() {
+            @Override
+            public Conference run() {
 
-        // TODO (Lesson 4)
-        // Create a new Conference Entity, specifying the user's Profile entity
-        // as the parent of the conference
-        Conference conference = new Conference(conferenceId, userId, conferenceForm);
-
-        // TODO (Lesson 4)
-        // Save Conference and Profile Entities
-        ofy().save().entities(conference,profile).now();
-
-        return conference;
-    }
-
-
-    @ApiMethod(
-            name = "queryConferences",
-            path = "queryConferences",
-            httpMethod = HttpMethod.POST
-    )
-    public List<Conference> queryConferences(ConferenceQueryForm conferenceQueryForm) {
-        Iterable<Conference> conferenceIterable = conferenceQueryForm.getQuery();
-        List<Conference> result = new ArrayList<>(0);
-        List<Key<Profile>> organizersKeyList = new ArrayList<>(0);
-        for (Conference conference : conferenceIterable) {
-            organizersKeyList.add(Key.create(Profile.class, conference.getOrganizerUserId()));
-            result.add(conference);
-        }
-        ofy().load().keys(organizersKeyList);
-        return result;
-    }
-
-    @ApiMethod(
-            name = "getConferencesCreated",
-            path = "getConferencesCreated",
-            httpMethod = HttpMethod.POST
-    )
-    public List<Conference> getConferencesCreated(final User user)
-            throws UnauthorizedException {
-        if (user == null) {
-            throw new UnauthorizedException("Authorization required");
-        }
-        Query query = ofy().load().type(Conference.class).ancestor(Key.create(Profile.class, user.getUserId()));
-        return query.list();
-    }
-
-
-    /**
-     * Returns a Conference object with the given conferenceId.
-     *
-     * @param websafeConferenceKey The String representation of the Conference Key.
-     * @return a Conference object with the given conferenceId.
-     * @throws NotFoundException when there is no Conference with the given conferenceId.
-     */
-    @ApiMethod(
-            name = "getConference",
-            path = "conference/{websafeConferenceKey}",
-            httpMethod = HttpMethod.GET
-    )
-    public Conference getConference(
-            @Named("websafeConferenceKey") final String websafeConferenceKey)
-            throws NotFoundException {
-        Key<Conference> conferenceKey = Key.create(websafeConferenceKey);
-        Conference conference = ofy().load().key(conferenceKey).now();
-        if (conference == null) {
-            throw new NotFoundException("No Conference found with key: " + websafeConferenceKey);
-        }
+                // TODO (Lesson 4)
+                // Get the existing Profile entity for the current user if there is one
+                // Otherwise create a new Profile entity with default values
+                Profile profile = getProfileFromUser(user);
+                // TODO (Lesson 4)
+                // Create a new Conference Entity, specifying the user's Profile entity
+                // as the parent of the conference
+                Conference conference = new Conference(conferenceId, userId, conferenceForm);
+                // TODO (Lesson 4)
+                // Save Conference and Profile Entities
+                ofy().save().entities(conference, profile).now();
+                queue.add(ofy().getTransaction(),
+                        TaskOptions.Builder.withUrl("/tasks/send_confirmation_email")
+                                .param("email", profile.getMainEmail())
+                                .param("conferenceInfo", conference.toString()));
+                return conference;
+            }
+        });
         return conference;
     }
 
@@ -502,5 +458,21 @@ public Collection<Conference> getConferencesToAttend(final User user)
         }
         // NotFoundException is actually thrown here.
         return new WrappedBoolean(result.getResult());
+    }
+
+    @ApiMethod(
+            name="getAnnouncement",
+            path = "announcement",
+            httpMethod = HttpMethod.GET
+
+    )
+    public Announcement getAnnouncement(){
+//TODO GET announcement from memcache by key and if
+        MemcacheService mem = MemcacheServiceFactory.getMemcacheService();
+        String announcementKey = Constants.MEMCACHE_ANNOUNCEMENTS_KEY;
+        Object message = mem.get(announcementKey);
+        if(message!=null)
+            return new Announcement(message.toString());
+        return null;
     }
 }
